@@ -24,27 +24,28 @@ case class MatryoshkaParameters(
                                  deltaNum:       Int = 4,
                                  shortHitWeight: Int = 2,
                                  longHitWeight:  Int = 4,
+                                 prefetchDegree: Int = 4
                                ) extends PrefetchParameters {
   override val hasPrefetchBit: Boolean = true
   override val inflightEntries: Int = 16
 }
 
 trait HasMatryoshkaParams extends HasHuanCunParameters {
+  val printFlag   = false
+
   val mParams = prefetchOpt.get.asInstanceOf[MatryoshkaParameters]
-
-  val printFlag   = true
-
-  val htSets      = mParams.htSets
-  val dmaSize     = mParams.dmaSize
-  val dssSets     = mParams.dssSets
-  val dssWays     = mParams.dssWays
-  val lineBits    = mParams.lineBits
-  val deltaNum    = mParams.deltaNum
-  val dmaConfBits = mParams.dmaConfBits
-  val dssConfBits = mParams.dssConfBits
-  val scoreBits   = mParams.scoreBits
+  val htSets         = mParams.htSets
+  val dmaSize        = mParams.dmaSize
+  val dssSets        = mParams.dssSets
+  val dssWays        = mParams.dssWays
+  val lineBits       = mParams.lineBits
+  val deltaNum       = mParams.deltaNum
+  val dmaConfBits    = mParams.dmaConfBits
+  val dssConfBits    = mParams.dssConfBits
+  val scoreBits      = mParams.scoreBits
   val shortHitWeight = mParams.shortHitWeight
-  val longHitWeight = mParams.longHitWeight
+  val longHitWeight  = mParams.longHitWeight
+  val prefetchDegree = mParams.prefetchDegree
 
   val bottomBits   = pageOffsetBits - lineBits
   val regionBits   = fullAddressBits - pageOffsetBits
@@ -286,7 +287,7 @@ class DeltaSequenceTable(implicit p:Parameters) extends MatryoshkaModule {
   val targetDeltasS2 = VecInit(Seq.fill(dssWays)(0.U(deltaBits.W)))
   val confS2 = VecInit(Seq.fill(dssWays)(0.U(dssConfBits.W)))
 
-  XSPerfPrint(printFlag, dmaPredictHit, p"DMA -> DMA Lookahead, Prefetch Seq[d0:${prefetchSeq(deltaBits-1, 0)}, d1:${prefetchSeq(deltaBits*2-1, deltaBits)}, " +
+  XSPerfPrint(printFlag, dmaPredictHit, p"DMA -> Lookahead, Prefetch Seq[d0:${prefetchSeq(deltaBits-1, 0)}, d1:${prefetchSeq(deltaBits*2-1, deltaBits)}, " +
     p"d2:${prefetchSeq(deltaBits*3-1, deltaBits*2)}], Long Tag:0x${Hexadecimal(longTag)}, Short Tag:0x${Hexadecimal(shortTag)}\n")
 
   // read dss for prefetching
@@ -302,11 +303,18 @@ class DeltaSequenceTable(implicit p:Parameters) extends MatryoshkaModule {
   io.targetDelta.valid := false.B
   io.targetDelta.bits := DontCare
   // compute scores and compare them with thresholds
-  when (shortHitsS2.reduce(_||_)) {
-    val finalScores = RegInit(VecInit(Seq.fill(dssWays)(0.U(scoreBits.W))))
+  val shortHitS2 = shortHitsS2.reduce(_||_)
+  val prefetchCounter = Counter(prefetchDegree+1)
+
+  when (io.reqHT.fire) {
+    prefetchCounter.reset()
+  }
+
+  when (shortHitS2 && prefetchCounter.value =/= prefetchDegree.U ) {
+    val finalScores = VecInit(Seq.fill(dssWays)(0.U(scoreBits.W)))
     var sumScore = WireInit(0.U((scoreBits+1).W))
-    val currentScores = (0 until dssWays).map(j => Mux(longHitsS2(j), longHitWeight.U, Mux(shortHitsS2(j), shortHitWeight.U, 0.U)) * confS2(j))
-    val validDeltas = (0 until dssWays).map(i => (i until dssWays).map(j => if (i == j) true.B else targetDeltasS2(i) === targetDeltasS2(j)).reduce(_&&_))
+    val currentScores = VecInit((0 until dssWays).map(j => Mux(longHitsS2(j), longHitWeight.U, Mux(shortHitsS2(j), shortHitWeight.U, 0.U)) * confS2(j)))
+    val validDeltas = VecInit((0 until dssWays).map(i => (i until dssWays).map(j => if (i == j) true.B else targetDeltasS2(i) =/= targetDeltasS2(j)).reduce(_&&_)))
     for (i <- 0 until dssWays) {
       sumScore = sumScore + currentScores(i)
       var eachScore = WireInit(0.U(scoreBits.W))
@@ -325,15 +333,20 @@ class DeltaSequenceTable(implicit p:Parameters) extends MatryoshkaModule {
     }
     predictDelta := candArbiter.io.out.bits
     io.targetDelta.valid := candArbiter.io.out.fire
-    io.targetDelta.bits := candArbiter.io.out.bits
+    io.targetDelta.bits  := candArbiter.io.out.bits
+    when (candArbiter.io.out.fire) {
+      prefetchCounter.inc()
+    }
     XSPerfPrint(printFlag, p"DSS -> Lookahead, Candidate Deltas:${targetDeltasS2}\n")
+    XSPerfPrint(printFlag, p"DSS -> Lookahead, Conf:${confS2}\n")
+    XSPerfPrint(printFlag, p"DSS -> Lookahead, Each Scores:${currentScores}\n")
     XSPerfPrint(printFlag, p"DSS -> Lookahead, Final Scores:${finalScores}\n")
     XSPerfPrint(printFlag, p"DSS -> Lookahead, Predict Delta:${predictDelta}, Final Score:${finalScores(candArbiter.io.chosen)}\n")
     XSPerfPrint(printFlag, p"DSS -> Lookahead, Long Hit:${longHitsS2}\n")
     XSPerfPrint(printFlag, p"DSS -> Lookahead, Short Hit:${shortHitsS2}\n")
   }
 
-  prefetchSeq := Mux(io.reqHT.fire, io.reqHT.bits.deltaSeq, Cat(prefetchSeq(deltaBits*2-1, 0), predictDelta))
+  prefetchSeq := Mux(io.reqHT.fire, io.reqHT.bits.deltaSeq, Mux(shortHitS2, Cat(prefetchSeq(deltaBits*2-1, 0), predictDelta), prefetchSeq))
   dss.io.r.req.valid := dmaHit
   dss.io.r.req.bits.setIdx := dmaHitIndex
 }

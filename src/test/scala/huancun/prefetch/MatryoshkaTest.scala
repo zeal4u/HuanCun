@@ -21,9 +21,9 @@ class MatryoshkaTest extends L2Tester(Some(MatryoshkaParameters())) {
   it should "pass" in {
     test(new Matryoshka()(prefetcher.p)) { dut =>
       def printOutput(): Unit = {
-        // println(dut.io.req.valid.peek())
-        // println(dut.io.req.bits.set.peek())
-        // println(dut.io.req.bits.tag.peek())
+//         println(dut.io.req.valid.peek())
+//         println(dut.io.req.bits.set.peek())
+//         println(dut.io.req.bits.tag.peek())
       }
 
       def streamAccess(count:Int, tag:Int): Unit = {
@@ -46,7 +46,7 @@ class MatryoshkaTest extends L2Tester(Some(MatryoshkaParameters())) {
       dut.io.req.ready.poke(true.B)
       streamAccess(10, 257)
       dut.io.train.valid.poke(false.B)
-      dut.clock.step(4)
+      stepAndprint(4)
     }
   }
 }
